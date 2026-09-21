@@ -5,11 +5,36 @@
 根据环境和配置自动选择合适的存储后端
 """
 
+import logging
 import os
 from typing import Optional
 
 from trendradar.storage.base import StorageBackend, NewsData, RSSData
 from trendradar.utils.time import DEFAULT_TIMEZONE
+
+try:
+    from botocore.exceptions import BotoCoreError, ClientError
+except ImportError:  # boto3 是可选依赖 / boto3 is optional
+    class BotoCoreError(Exception):  # type: ignore[no-redef]
+        pass
+
+    class ClientError(Exception):  # type: ignore[no-redef]
+        pass
+
+
+logger = logging.getLogger(__name__)
+
+# 远程后端初始化失败时允许回退到本地存储的显式开关
+# Opt-in switch: fall back to local storage when the remote backend cannot start
+ALLOW_LOCAL_FALLBACK_ENV = "STORAGE_ALLOW_LOCAL_FALLBACK"
+
+# 远程后端构造阶段可预期的异常（依赖缺失、配置/凭证错误、客户端构造失败）
+# Expected failures while constructing the remote backend
+REMOTE_BACKEND_INIT_ERRORS = (ImportError, ValueError, BotoCoreError, ClientError)
+
+
+class RemoteBackendInitError(RuntimeError):
+    """远程存储后端初始化失败 / remote storage backend failed to initialize"""
 
 
 # 存储管理器单例
@@ -124,8 +149,21 @@ class StorageManager:
 
         return has_config
 
-    def _create_remote_backend(self) -> Optional[StorageBackend]:
-        """创建远程存储后端"""
+    @staticmethod
+    def _local_fallback_allowed() -> bool:
+        """是否显式允许在远程后端不可用时回退到本地存储。
+        True only when STORAGE_ALLOW_LOCAL_FALLBACK is explicitly enabled.
+        """
+        return os.environ.get(ALLOW_LOCAL_FALLBACK_ENV, "").strip().lower() in ("1", "true", "yes")
+
+    def _create_remote_backend(self) -> StorageBackend:
+        """
+        创建远程存储后端。Create the remote storage backend.
+
+        Raises:
+            RemoteBackendInitError: 依赖缺失或初始化失败（保留原始异常链）
+                Missing dependency or init failure (original exception is chained)
+        """
         try:
             from trendradar.storage.remote import RemoteStorageBackend
 
@@ -140,24 +178,56 @@ class StorageManager:
                 timezone=self.timezone,
             )
         except ImportError as e:
-            print(f"[存储管理器] 远程后端导入失败: {e}")
-            print("[存储管理器] 请确保已安装 boto3: pip install boto3")
-            return None
-        except Exception as e:
-            print(f"[存储管理器] 远程后端初始化失败: {e}")
+            logger.exception(
+                "[存储管理器] 远程后端导入失败，请确保已安装 boto3: pip install boto3 / "
+                "remote backend import failed; install boto3"
+            )
+            raise RemoteBackendInitError(f"远程后端导入失败 / remote backend import failed: {e}") from e
+        except REMOTE_BACKEND_INIT_ERRORS as e:
+            logger.exception("[存储管理器] 远程后端初始化失败 / remote backend init failed")
+            raise RemoteBackendInitError(f"远程后端初始化失败 / remote backend init failed: {e}") from e
+
+    def _try_create_remote_backend(self) -> Optional[StorageBackend]:
+        """创建远程后端，失败时返回 None（用于拉取/清理等非关键路径）。
+        Create the remote backend, or return None on init failure (pull/cleanup paths).
+        """
+        try:
+            return self._create_remote_backend()
+        except RemoteBackendInitError:
             return None
 
     def get_backend(self) -> StorageBackend:
-        """获取存储后端实例"""
+        """
+        获取存储后端实例。Return the storage backend.
+
+        Raises:
+            RemoteBackendInitError: 已解析为远程存储但初始化失败，且未通过
+                STORAGE_ALLOW_LOCAL_FALLBACK 显式允许回退到本地存储。
+                Remote storage was selected, init failed, and local fallback is not opted in.
+        """
         if self._backend is None:
             resolved_type = self._resolve_backend_type()
 
             if resolved_type == "remote":
-                self._backend = self._create_remote_backend()
-                if self._backend:
-                    print(f"[存储管理器] 使用远程存储后端")
-                else:
-                    print("[存储管理器] 回退到本地存储")
+                try:
+                    self._backend = self._create_remote_backend()
+                    print("[存储管理器] 使用远程存储后端")
+                    print("[storage] using remote storage backend")
+                except RemoteBackendInitError:
+                    if not self._local_fallback_allowed():
+                        logger.error(
+                            "[存储管理器] 远程存储不可用，拒绝静默回退到本地存储；"
+                            "如需回退请设置 %s=true / refusing silent local fallback, set %s=true to opt in",
+                            ALLOW_LOCAL_FALLBACK_ENV,
+                            ALLOW_LOCAL_FALLBACK_ENV,
+                        )
+                        raise
+                    logger.warning(
+                        "[存储管理器] 远程存储不可用，已按 %s 回退到本地存储（数据不会持久化到远程） / "
+                        "remote storage unavailable, falling back to local because %s is set",
+                        ALLOW_LOCAL_FALLBACK_ENV,
+                        ALLOW_LOCAL_FALLBACK_ENV,
+                    )
                     resolved_type = "local"
 
             if resolved_type == "local" or self._backend is None:
@@ -189,10 +259,11 @@ class StorageManager:
 
         # 创建远程后端（如果还没有）
         if self._remote_backend is None:
-            self._remote_backend = self._create_remote_backend()
+            self._remote_backend = self._try_create_remote_backend()
 
         if self._remote_backend is None:
             print("[存储管理器] 无法创建远程后端，拉取失败")
+            print("[storage] could not create the remote backend; pull skipped")
             return 0
 
         # 调用拉取方法
@@ -265,7 +336,7 @@ class StorageManager:
         # 清理远程数据（如果配置了）
         if self.remote_retention_days > 0 and self._has_remote_config():
             if self._remote_backend is None:
-                self._remote_backend = self._create_remote_backend()
+                self._remote_backend = self._try_create_remote_backend()
             if self._remote_backend:
                 total_deleted += self._remote_backend.cleanup_old_data(self.remote_retention_days)
 
