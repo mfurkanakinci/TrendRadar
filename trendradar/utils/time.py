@@ -5,10 +5,13 @@
 本模块提供统一的时间处理函数，所有时区相关操作都应使用 DEFAULT_TIMEZONE 常量。
 """
 
+import logging
 from datetime import datetime
 from typing import Optional
 
 import pytz
+
+logger = logging.getLogger(__name__)
 
 # 默认时区常量 - 仅作为 fallback，正常运行时使用 config.yaml 中的 app.timezone
 DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -161,15 +164,19 @@ def format_iso_time_friendly(
         else:
             return dt_local.strftime("%H:%M")
 
+    except (ValueError, TypeError):
+        pass
     except Exception:
-        # 出错时返回原始字符串的简化版本
-        if "T" in iso_time:
-            parts = iso_time.split("T")
-            if len(parts) == 2:
-                date_part = parts[0][5:]  # MM-DD
-                time_part = parts[1][:5]  # HH:MM
-                return f"{date_part} {time_part}" if include_date else time_part
-        return iso_time
+        logger.warning("format_iso_time_friendly failed for %r", iso_time, exc_info=True)
+
+    # 出错时返回原始字符串的简化版本
+    if isinstance(iso_time, str) and "T" in iso_time:
+        parts = iso_time.split("T")
+        if len(parts) == 2:
+            date_part = parts[0][5:]  # MM-DD
+            time_part = parts[1][:5]  # HH:MM
+            return f"{date_part} {time_part}" if include_date else time_part
+    return iso_time
 
 
 def is_within_days(
@@ -234,8 +241,11 @@ def is_within_days(
 
         return days_diff <= max_days
 
-    except Exception:
+    except (ValueError, TypeError):
         # 出错时保留文章
+        return True
+    except Exception:
+        logger.warning("is_within_days failed for %r; keeping article", iso_time, exc_info=True)
         return True
 
 
@@ -282,6 +292,9 @@ def calculate_days_old(iso_time: str, timezone: str = DEFAULT_TIMEZONE) -> Optio
         diff = now - dt
         return diff.total_seconds() / (24 * 60 * 60)
 
+    except (ValueError, TypeError):
+        return None
     except Exception:
+        logger.warning("calculate_days_old failed for %r", iso_time, exc_info=True)
         return None
 
