@@ -7,8 +7,11 @@ RSS 抓取器
 
 import time
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
@@ -41,6 +44,7 @@ class RSSFetcher:
         timezone: str = DEFAULT_TIMEZONE,
         freshness_enabled: bool = True,
         default_max_age_days: int = 3,
+        max_workers: int = 4,
     ):
         """
         初始化抓取器
@@ -54,6 +58,8 @@ class RSSFetcher:
             timezone: 时区配置（如 'Asia/Shanghai'）
             freshness_enabled: 是否启用新鲜度过滤
             default_max_age_days: 默认最大文章年龄（天）
+            max_workers: 并发抓取线程数。不同主机并行，同一主机按 request_interval 限速。
+                Concurrent workers. Different hosts run in parallel; one host stays rate-limited.
         """
         self.feeds = [f for f in feeds if f.enabled]
         self.request_interval = request_interval
@@ -63,9 +69,49 @@ class RSSFetcher:
         self.timezone = timezone
         self.freshness_enabled = freshness_enabled
         self.default_max_age_days = default_max_age_days
+        try:
+            workers = int(max_workers)
+        except (TypeError, ValueError):
+            workers = 4
+        self.max_workers = max(1, workers)
 
         self.parser = RSSParser()
-        self.session = self._create_session()
+        self._local = threading.local()
+        self._host_lock = threading.Lock()
+        self._host_locks: Dict[str, threading.Lock] = {}
+        self._host_last_request: Dict[str, float] = {}
+
+    @property
+    def session(self) -> requests.Session:
+        """每个线程独立的请求会话，避免并发修改共享 headers。
+        One requests session per thread so concurrent fetches do not share headers.
+        """
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._create_session()
+            self._local.session = session
+        return session
+
+    @session.setter
+    def session(self, value: requests.Session) -> None:
+        self._local.session = value
+
+    def _wait_for_host(self, url: str) -> None:
+        """同一主机的请求之间保持 request_interval 间隔（带随机波动）。
+        Keep request_interval (with jitter) between requests to the same host.
+        """
+        host = (urlparse(url).hostname or "").lower()
+        with self._host_lock:
+            lock = self._host_locks.setdefault(host, threading.Lock())
+        with lock:
+            last = self._host_last_request.get(host)
+            if last is not None:
+                interval = self.request_interval / 1000
+                jitter = random.uniform(-0.2, 0.2) * interval
+                remaining = last + interval + jitter - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+            self._host_last_request[host] = time.monotonic()
 
     def _create_session(self) -> requests.Session:
         """创建请求会话"""
@@ -169,15 +215,17 @@ class RSSFetcher:
 
         print(f"[RSS] 开始抓取 {len(self.feeds)} 个 RSS 源...")
 
-        for i, feed in enumerate(self.feeds):
-            # 请求间隔（带随机波动）
-            if i > 0:
-                interval = self.request_interval / 1000
-                jitter = random.uniform(-0.2, 0.2) * interval
-                time.sleep(interval + jitter)
+        def fetch_one(feed: RSSFeedConfig) -> Tuple[List[RSSItem], Optional[str]]:
+            self._wait_for_host(feed.url)
+            return self.fetch_feed(feed)
 
-            items, error = self.fetch_feed(feed)
+        workers = min(self.max_workers, len(self.feeds)) or 1
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            outcomes = list(executor.map(fetch_one, self.feeds))
 
+        # 按配置顺序汇总，保持输出顺序稳定
+        # Aggregate in config order so the result order stays stable.
+        for feed, (items, error) in zip(self.feeds, outcomes):
             id_to_name[feed.id] = feed.name
 
             if error:
@@ -260,4 +308,5 @@ class RSSFetcher:
             timezone=config.get("timezone", DEFAULT_TIMEZONE),
             freshness_enabled=freshness_enabled,
             default_max_age_days=default_max_age_days,
+            max_workers=config.get("max_workers", 4),
         )
