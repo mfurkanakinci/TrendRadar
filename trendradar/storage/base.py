@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Set
 
 
+class StorageError(Exception):
+    """存储层不可容忍的错误（如去重/幂等判断所需的读取失败）"""
+
+
 @dataclass
 class NewsItem:
     """新闻条目数据模型（热榜数据）"""
