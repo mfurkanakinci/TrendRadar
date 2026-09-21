@@ -5,6 +5,7 @@
 使用 SQLite 作为主存储，支持可选的 TXT 快照和 HTML 报告
 """
 
+import logging
 import sqlite3
 import shutil
 import pytz
@@ -21,6 +22,8 @@ from trendradar.utils.time import (
     format_date_folder,
     format_time_filename,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
@@ -340,8 +343,8 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
             print(f"[本地存储] TXT 快照已保存: {file_path}")
             return str(file_path)
 
-        except Exception as e:
-            print(f"[本地存储] 保存 TXT 快照失败: {e}")
+        except OSError:
+            logger.error("[本地存储] 保存 TXT 快照失败", exc_info=True)
             return None
 
     def save_html_report(self, html_content: str, filename: str) -> Optional[str]:
@@ -373,8 +376,8 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
             print(f"[本地存储] HTML 报告已保存: {file_path}")
             return str(file_path)
 
-        except Exception as e:
-            print(f"[本地存储] 保存 HTML 报告失败: {e}")
+        except OSError:
+            logger.error("[本地存储] 保存 HTML 报告失败", exc_info=True)
             return None
 
     # ========================================
@@ -387,8 +390,8 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
             try:
                 conn.close()
                 print(f"[本地存储] 关闭数据库连接: {db_path}")
-            except Exception as e:
-                print(f"[本地存储] 关闭连接失败 {db_path}: {e}")
+            except sqlite3.Error:
+                logger.error("[本地存储] 关闭连接失败 %s", db_path, exc_info=True)
 
         self._db_connections.clear()
 
@@ -418,18 +421,19 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
             """从文件名或目录名解析日期 (ISO 格式: YYYY-MM-DD)"""
             # 移除 .db 后缀
             name = name.replace('.db', '')
+            date_match = re.match(r'(\d{4})-(\d{2})-(\d{2})', name)
+            if not date_match:
+                return None
             try:
-                date_match = re.match(r'(\d{4})-(\d{2})-(\d{2})', name)
-                if date_match:
-                    return datetime(
-                        int(date_match.group(1)),
-                        int(date_match.group(2)),
-                        int(date_match.group(3)),
-                        tzinfo=pytz.timezone(self.timezone)
-                    )
-            except Exception:
-                pass
-            return None
+                return datetime(
+                    int(date_match.group(1)),
+                    int(date_match.group(2)),
+                    int(date_match.group(3)),
+                    tzinfo=pytz.timezone(self.timezone)
+                )
+            except (ValueError, pytz.UnknownTimeZoneError):
+                logger.warning("[本地存储] 无法解析日期名称: %s", name, exc_info=True)
+                return None
 
         try:
             if not self.data_dir.exists():
@@ -447,19 +451,19 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
                         # 先关闭数据库连接
                         db_path = str(db_file)
                         if db_path in self._db_connections:
+                            conn = self._db_connections.pop(db_path)
                             try:
-                                self._db_connections[db_path].close()
-                                del self._db_connections[db_path]
-                            except Exception:
-                                pass
+                                conn.close()
+                            except sqlite3.Error:
+                                logger.warning("[本地存储] 关闭连接失败 %s", db_path, exc_info=True)
 
                         # 删除文件
                         try:
                             db_file.unlink()
                             deleted_count += 1
                             print(f"[本地存储] 清理过期数据: {db_type}/{db_file.name}")
-                        except Exception as e:
-                            print(f"[本地存储] 删除文件失败 {db_file}: {e}")
+                        except OSError:
+                            logger.error("[本地存储] 删除文件失败 %s", db_file, exc_info=True)
 
             # 清理快照目录 (txt/, html/)
             for snapshot_type in ["txt", "html"]:
@@ -477,16 +481,16 @@ class LocalStorageBackend(SQLiteStorageMixin, StorageBackend):
                             shutil.rmtree(date_folder)
                             deleted_count += 1
                             print(f"[本地存储] 清理过期数据: {snapshot_type}/{date_folder.name}")
-                        except Exception as e:
-                            print(f"[本地存储] 删除目录失败 {date_folder}: {e}")
+                        except OSError:
+                            logger.error("[本地存储] 删除目录失败 %s", date_folder, exc_info=True)
 
             if deleted_count > 0:
                 print(f"[本地存储] 共清理 {deleted_count} 个过期文件/目录")
 
             return deleted_count
 
-        except Exception as e:
-            print(f"[本地存储] 清理过期数据失败: {e}")
+        except OSError:
+            logger.error("[本地存储] 清理过期数据失败", exc_info=True)
             return deleted_count
 
     def __del__(self):
