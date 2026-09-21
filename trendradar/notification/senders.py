@@ -229,7 +229,6 @@ SMTP_CONFIGS = {
     "live.com": {"server": "smtp-mail.outlook.com", "port": 587, "encryption": "TLS"},
     # 网易邮箱（使用 SSL，更稳定）
     "163.com": {"server": "smtp.163.com", "port": 465, "encryption": "SSL"},
-    "126.com": {"server": "smtp.126.com", "port": 465, "encryption": "SSL"},
     # 新浪邮箱（使用 SSL）
     "sina.com": {"server": "smtp.sina.com", "port": 465, "encryption": "SSL"},
     # 搜狐邮箱（使用 SSL）
@@ -656,7 +655,7 @@ def send_to_email(
     """
     try:
         if not html_file_path or not Path(html_file_path).exists():
-            print(f"错误：HTML文件不存在或未提侚: {html_file_path}")
+            print(f"错误：HTML文件不存在或未提供: {html_file_path}")
             return False
 
         print(f"使用HTML文件: {html_file_path}")
