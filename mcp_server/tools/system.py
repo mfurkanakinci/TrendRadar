@@ -4,13 +4,16 @@
 实现系统状态查询和爬虫触发功能。
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..services.data_service import DataService
 from ..utils.validators import validate_platforms
-from ..utils.errors import MCPError, CrawlTaskError
+from ..utils.errors import CrawlTaskError, tool_boundary
+
+log = logging.getLogger(__name__)
 
 
 class SystemManagementTools:
@@ -31,6 +34,7 @@ class SystemManagementTools:
             current_file = Path(__file__)
             self.project_root = current_file.parent.parent.parent
 
+    @tool_boundary
     def get_system_status(self) -> Dict:
         """
         获取系统运行状态和健康检查信息
@@ -43,31 +47,15 @@ class SystemManagementTools:
             >>> result = tools.get_system_status()
             >>> print(result['system']['version'])
         """
-        try:
-            # 获取系统状态
-            status = self.data_service.get_system_status()
+        status = self.data_service.get_system_status()
 
-            return {
-                "success": True,
-                "summary": {
-                    "description": "系统运行状态和健康检查信息"
-                },
-                "data": status
-            }
-
-        except MCPError as e:
-            return {
-                "success": False,
-                "error": e.to_dict()
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": {
-                    "code": "INTERNAL_ERROR",
-                    "message": str(e)
-                }
-            }
+        return {
+            "success": True,
+            "summary": {
+                "description": "系统运行状态和健康检查信息"
+            },
+            "data": status
+        }
 
     def _load_crawl_config(self):
         """加载爬取配置，返回 (config_data, target_platforms_config)"""
@@ -141,7 +129,7 @@ class SystemManagementTools:
                     saved_files["html"] = html_path
 
         except Exception as e:
-            print(f"[System] 数据保存失败: {e}")
+            log.exception("crawl result save failed")
             save_success = False
             save_error_msg = str(e)
 
@@ -198,6 +186,7 @@ class SystemManagementTools:
 
         return result
 
+    @tool_boundary
     def trigger_crawl(self, platforms: Optional[List[str]] = None, save_to_local: bool = False, include_url: bool = False) -> Dict:
         """
         手动触发一次临时爬取任务（可选持久化）
@@ -210,87 +199,73 @@ class SystemManagementTools:
         Returns:
             爬取结果字典，包含新闻数据和保存路径（如果保存）
         """
+        from trendradar.crawler.fetcher import DataFetcher
+        from trendradar.storage.local import LocalStorageBackend
+        from trendradar.storage.base import convert_crawl_results_to_news_data
+        from trendradar.utils.time import get_configured_time, format_date_folder, format_time_filename
+        from ..services.cache_service import get_cache
+
+        platforms = validate_platforms(platforms)
+
+        # 1. 加载配置
+        config_data, all_platforms = self._load_crawl_config()
+        target_platforms, ids = self._resolve_target_platforms(all_platforms, platforms)
+
+        print(f"开始临时爬取，平台: {[p.get('name', p['id']) for p in target_platforms]}")
+
+        # 2. 执行爬取
+        advanced = config_data.get("advanced", {})
+        crawler_config = advanced.get("crawler", {})
+        platforms_config = config_data.get("platforms", {})
+        proxy_url = crawler_config.get("default_proxy") if crawler_config.get("use_proxy") else None
+        api_url = (
+            os.environ.get("PLATFORMS_API_URL", "").strip()
+            or platforms_config.get("api_url", "")
+        ) or None
+
+        domain_rules = {}
+        for p in target_platforms:
+            ed = p.get("expected_domain", "")
+            if ed:
+                domain_rules[p["id"]] = ed
+
+        fetcher = DataFetcher(proxy_url=proxy_url, api_url=api_url)
+        results, id_to_name, failed_ids = fetcher.crawl_websites(
+            ids_list=ids,
+            request_interval=crawler_config.get("request_interval", 100),
+            domain_rules=domain_rules,
+        )
+
+        # 3. 转换与持久化
+        timezone = config_data.get("app", {}).get("timezone", "Asia/Shanghai")
+        current_time = get_configured_time(timezone)
+        crawl_date = format_date_folder(None, timezone)
+        crawl_time_str = format_time_filename(timezone)
+
+        news_data = convert_crawl_results_to_news_data(
+            results=results, id_to_name=id_to_name,
+            failed_ids=failed_ids, crawl_time=crawl_time_str, crawl_date=crawl_date
+        )
+
+        storage = LocalStorageBackend(
+            data_dir=str(self.project_root / "output"),
+            enable_txt=True, enable_html=True, timezone=timezone
+        )
+
         try:
-            from trendradar.crawler.fetcher import DataFetcher
-            from trendradar.storage.local import LocalStorageBackend
-            from trendradar.storage.base import convert_crawl_results_to_news_data
-            from trendradar.utils.time import get_configured_time, format_date_folder, format_time_filename
-            from ..services.cache_service import get_cache
-
-            platforms = validate_platforms(platforms)
-
-            # 1. 加载配置
-            config_data, all_platforms = self._load_crawl_config()
-            target_platforms, ids = self._resolve_target_platforms(all_platforms, platforms)
-
-            print(f"开始临时爬取，平台: {[p.get('name', p['id']) for p in target_platforms]}")
-
-            # 2. 执行爬取
-            advanced = config_data.get("advanced", {})
-            crawler_config = advanced.get("crawler", {})
-            platforms_config = config_data.get("platforms", {})
-            proxy_url = crawler_config.get("default_proxy") if crawler_config.get("use_proxy") else None
-            api_url = (
-                os.environ.get("PLATFORMS_API_URL", "").strip()
-                or platforms_config.get("api_url", "")
-            ) or None
-
-            domain_rules = {}
-            for p in target_platforms:
-                ed = p.get("expected_domain", "")
-                if ed:
-                    domain_rules[p["id"]] = ed
-
-            fetcher = DataFetcher(proxy_url=proxy_url, api_url=api_url)
-            results, id_to_name, failed_ids = fetcher.crawl_websites(
-                ids_list=ids,
-                request_interval=crawler_config.get("request_interval", 100),
-                domain_rules=domain_rules,
+            save_success, save_error_msg, saved_files = self._persist_crawl_data(
+                storage, news_data, save_to_local, results, id_to_name, failed_ids, current_time, crawl_time_str
             )
+        finally:
+            get_cache().clear()
+            print("[System] 缓存已清除")
+            storage.cleanup()
 
-            # 3. 转换与持久化
-            timezone = config_data.get("app", {}).get("timezone", "Asia/Shanghai")
-            current_time = get_configured_time(timezone)
-            crawl_date = format_date_folder(None, timezone)
-            crawl_time_str = format_time_filename(timezone)
-
-            news_data = convert_crawl_results_to_news_data(
-                results=results, id_to_name=id_to_name,
-                failed_ids=failed_ids, crawl_time=crawl_time_str, crawl_date=crawl_date
-            )
-
-            storage = LocalStorageBackend(
-                data_dir=str(self.project_root / "output"),
-                enable_txt=True, enable_html=True, timezone=timezone
-            )
-
-            try:
-                save_success, save_error_msg, saved_files = self._persist_crawl_data(
-                    storage, news_data, save_to_local, results, id_to_name, failed_ids, current_time, crawl_time_str
-                )
-            finally:
-                get_cache().clear()
-                print("[System] 缓存已清除")
-                storage.cleanup()
-
-            # 4. 构建响应
-            return self._build_crawl_response(
-                results, id_to_name, failed_ids, current_time, include_url,
-                save_success, save_to_local, save_error_msg, saved_files
-            )
-
-        except MCPError as e:
-            return {"success": False, "error": e.to_dict()}
-        except Exception as e:
-            import traceback
-            return {
-                "success": False,
-                "error": {
-                    "code": "INTERNAL_ERROR",
-                    "message": str(e),
-                    "traceback": traceback.format_exc()
-                }
-            }
+        # 4. 构建响应
+        return self._build_crawl_response(
+            results, id_to_name, failed_ids, current_time, include_url,
+            save_success, save_to_local, save_error_msg, saved_files
+        )
 
     def _generate_simple_html(self, results: Dict, id_to_name: Dict, failed_ids: List, now) -> str:
         """生成简化的 HTML 报告"""
@@ -382,6 +357,7 @@ class SystemManagementTools:
             .replace("'", "&#x27;")
         )
 
+    @tool_boundary
     def check_version(self, proxy_url: Optional[str] = None) -> Dict:
         """
         检查版本更新
@@ -464,6 +440,7 @@ class SystemManagementTools:
                     "message": message
                 }
             except Exception as e:
+                log.exception("version check for %s failed", name)
                 return {
                     "success": False,
                     "name": name,
@@ -540,18 +517,11 @@ class SystemManagementTools:
             }
 
         except ImportError as e:
+            log.exception("version info import failed")
             return {
                 "success": False,
                 "error": {
                     "code": "IMPORT_ERROR",
                     "message": f"无法导入版本信息: {str(e)}"
-                }
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": {
-                    "code": "INTERNAL_ERROR",
-                    "message": str(e)
                 }
             }
