@@ -5,6 +5,7 @@ v2.0.0: 仅支持 SQLite 数据库，移除 TXT 文件支持
 新存储结构：output/{type}/{date}.db
 """
 
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -15,6 +16,8 @@ import yaml
 
 from ..utils.errors import FileParseError, DataNotFoundError
 from .cache_service import get_cache
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ParserService:
@@ -94,7 +97,10 @@ class ParserService:
             db_type: 数据库类型 ("news" 或 "rss")
 
         Returns:
-            (all_titles, id_to_name, all_timestamps) 元组，如果数据库不存在返回 None
+            (all_titles, id_to_name, all_timestamps) 元组，如果数据库不存在或为空返回 None
+
+        Raises:
+            FileParseError: 数据库读取失败（损坏、锁定、表结构不匹配等）
         """
         db_path = self._get_db_path(date, db_type)
         if db_path is None:
@@ -106,20 +112,24 @@ class ParserService:
 
         try:
             conn = sqlite3.connect(str(db_path))
+        except sqlite3.Error as e:
+            LOGGER.error("SQLite 打开失败: %s", db_path, exc_info=True)
+            raise FileParseError(str(db_path), str(e)) from e
+
+        try:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
             if db_type == "news":
                 return self._read_news_from_sqlite(cursor, platform_ids, all_titles, id_to_name, all_timestamps)
-            elif db_type == "rss":
+            if db_type == "rss":
                 return self._read_rss_from_sqlite(cursor, platform_ids, all_titles, id_to_name, all_timestamps)
-
-        except Exception as e:
-            print(f"Warning: 从 SQLite 读取数据失败: {e}")
             return None
+        except sqlite3.Error as e:
+            LOGGER.error("SQLite 读取失败: %s (db_type=%s)", db_path, db_type, exc_info=True)
+            raise FileParseError(str(db_path), str(e)) from e
         finally:
-            if 'conn' in locals():
-                conn.close()
+            conn.close()
 
     def _read_news_from_sqlite(
         self,
@@ -323,6 +333,7 @@ class ParserService:
 
         Raises:
             DataNotFoundError: 数据不存在
+            FileParseError: 数据库读取失败
         """
         date_str = self.get_date_folder_name(date)
         platform_key = ','.join(sorted(platform_ids)) if platform_ids else 'all'
