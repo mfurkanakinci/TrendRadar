@@ -4,15 +4,19 @@
 定义MCP Server使用的所有自定义异常类型。
 """
 
+import functools
+import logging
 from typing import Optional, List, Callable
+
+log = logging.getLogger(__name__)
 
 
 # ==================== 延迟加载支持的平台列表 ====================
 
-_get_supported_platforms: Optional[Callable[[], List[str]]] = None
+_get_supported_platforms: Optional[Callable[[], Optional[List[str]]]] = None
 
 
-def _load_supported_platforms() -> List[str]:
+def _load_supported_platforms() -> Optional[List[str]]:
     """延迟加载支持的平台列表"""
     global _get_supported_platforms
     if _get_supported_platforms is None:
@@ -111,3 +115,25 @@ class FileParseError(MCPError):
             code="FILE_PARSE_ERROR",
             suggestion="请检查文件格式是否正确"
         )
+
+
+def tool_boundary(fn: Callable) -> Callable:
+    """工具方法的统一错误边界：MCPError 转为结构化错误，其他异常记录日志后返回 INTERNAL_ERROR"""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except MCPError as e:
+            return {"success": False, "error": e.to_dict()}
+        except Exception as e:
+            log.exception("tool %s failed", fn.__name__)
+            return {
+                "success": False,
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": str(e)
+                }
+            }
+
+    return wrapper
