@@ -6,8 +6,11 @@ URL 处理工具模块
 - normalize_url: 标准化 URL，去除动态参数
 """
 
+import logging
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from typing import Dict, Set
+
+logger = logging.getLogger(__name__)
 
 
 # 各平台需要移除的特定参数
@@ -123,6 +126,12 @@ def normalize_url(url: str, platform_id: str = "") -> str:
 
         return normalized
 
-    except Exception:
+    except (ValueError, TypeError, AttributeError, UnicodeError):
         # 解析失败时返回原始 URL
+        logger.warning(
+            "normalize_url failed for platform=%r url=%r; using raw URL as dedup key",
+            platform_id,
+            url,
+            exc_info=True,
+        )
         return url
