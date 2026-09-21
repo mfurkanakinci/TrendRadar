@@ -7,13 +7,16 @@
 
 from datetime import datetime
 from typing import List, Optional, Union
+import logging
 import os
 import json
 import yaml
 import ast
 
-from .errors import InvalidParameterError
+from .errors import ConfigurationError, InvalidParameterError
 from .date_parser import DateParser
+
+log = logging.getLogger(__name__)
 
 
 # ==================== 辅助函数：处理字符串序列化 ====================
@@ -154,17 +157,17 @@ _platforms_config_mtime: float = 0.0
 _platforms_config_path: Optional[str] = None
 
 
-def get_supported_platforms() -> List[str]:
+def get_supported_platforms() -> Optional[List[str]]:
     """
     从 config.yaml 动态获取支持的平台列表（带 mtime 缓存）
 
     仅当 config.yaml 被修改时才重新读取，避免每次 MCP 调用的重复 IO。
 
     Returns:
-        平台ID列表
+        平台ID列表；配置无法读取或解析时返回 None
 
     Note:
-        - 读取失败时返回空列表，允许所有平台通过（降级策略）
+        - 读取失败时返回 None（区别于合法的空列表），由调用方决定如何处理
         - 平台列表来自 config/config.yaml 中的 platforms 配置
     """
     global _platforms_cache, _platforms_config_mtime, _platforms_config_path
@@ -188,9 +191,9 @@ def get_supported_platforms() -> List[str]:
             _platforms_cache = [p['id'] for p in sources if 'id' in p and p.get('enabled', True)]
             _platforms_config_mtime = current_mtime
             return _platforms_cache
-    except Exception as e:
-        print(f"警告：无法加载平台配置: {e}")
-        return []
+    except (OSError, yaml.YAMLError, KeyError, AttributeError, TypeError):
+        log.error("无法加载平台配置: %s", _platforms_config_path, exc_info=True)
+        return None
 
 
 def validate_platforms(platforms: Optional[Union[List[str], str]]) -> List[str]:
@@ -212,36 +215,36 @@ def validate_platforms(platforms: Optional[Union[List[str], str]]) -> List[str]:
 
     Raises:
         InvalidParameterError: 平台不支持
+        ConfigurationError: 平台配置无法加载
 
     Note:
         - platforms=None 时，返回 config.yaml 中配置的平台列表
         - 会验证平台ID是否在 config.yaml 的 platforms 配置中
-        - 配置加载失败时，允许所有平台通过（降级策略）
     """
     supported_platforms = get_supported_platforms()
+    if supported_platforms is None:
+        raise ConfigurationError(
+            "平台配置不可用",
+            suggestion="请检查 config/config.yaml 是否存在且格式正确，详情见服务日志"
+        )
 
     if platforms is None:
         # 返回配置文件中的平台列表（用户的默认配置）
-        return supported_platforms if supported_platforms else []
+        return supported_platforms
 
     # 支持字符串形式的列表输入（某些 MCP 客户端会将 JSON 数组序列化为字符串）
     if isinstance(platforms, str):
         platforms = _parse_string_to_list(platforms)
         if not platforms:
             # 空字符串或解析后为空，使用默认平台
-            return supported_platforms if supported_platforms else []
+            return supported_platforms
 
     if not isinstance(platforms, list):
         raise InvalidParameterError("platforms 参数必须是列表类型")
 
     if not platforms:
         # 空列表时，返回配置文件中的平台列表
-        return supported_platforms if supported_platforms else []
-
-    # 如果配置加载失败（supported_platforms为空），允许所有平台通过
-    if not supported_platforms:
-        print("警告：平台配置未加载，跳过平台验证")
-        return platforms
+        return supported_platforms
 
     # 验证每个平台是否在配置中
     invalid_platforms = [p for p in platforms if p not in supported_platforms]
@@ -422,7 +425,7 @@ def validate_date_range(date_range: Optional[Union[dict, str]]) -> Optional[tupl
             except Exception:
                 raise InvalidParameterError(
                     f"日期解析失败: {stripped}",
-                    suggestion="支持格式: YYYY-MM-DD, {\"start\": \"...\", \"end\": \"...\"}, 或自然语言（今天、本周、最近7天等）"
+                    suggestion="支持格式: YYYY-MM-DD, {\"start\", \"...\", \"end\": \"...\"}, 或自然语言（今天、本周、最近7天等）"
                 )
 
     if not isinstance(date_range, dict):
