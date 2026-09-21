@@ -473,7 +473,9 @@ advanced:
 
   # RSS 设置
   rss:
-    request_interval: 1000            # 请求间隔（毫秒）
+    request_interval: 1000            # 请求间隔（毫秒）/ pause between requests to the same host
+    max_workers: 4                    # 并发抓取线程数；不同主机并行，同一主机仍受 request_interval 限制
+                                      # concurrent fetch workers; different hosts run in parallel, one host stays rate-limited
     timeout: 15                       # 请求超时（秒）
     use_proxy: false                  # 是否使用代理（true=启用, false=不使用）
     proxy_url: ""                     # RSS 专属代理（留空则使用 crawler.default_proxy）
