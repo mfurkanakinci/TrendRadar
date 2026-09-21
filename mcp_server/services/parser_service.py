@@ -13,6 +13,8 @@ from datetime import datetime
 
 import yaml
 
+from trendradar.utils.sqlite import execute_chunked_in
+
 from ..utils.errors import FileParseError, DataNotFoundError
 from .cache_service import get_cache
 
@@ -166,14 +168,15 @@ class ParserService:
         rank_history_map = {}
 
         if news_ids:
-            placeholders = ",".join("?" * len(news_ids))
-            cursor.execute(f"""
+            # 分块 IN，避免超过 SQLite 999 变量上限
+            # Chunk the IN clause so large batches stay under SQLite's 999-variable limit
+            rh_rows = execute_chunked_in(cursor, """
                 SELECT news_item_id, rank FROM rank_history
                 WHERE news_item_id IN ({placeholders})
                 ORDER BY news_item_id, crawl_time
             """, news_ids)
 
-            for rh_row in cursor.fetchall():
+            for rh_row in rh_rows:
                 news_id = rh_row['news_item_id']
                 rank = rh_row['rank']
                 if news_id not in rank_history_map:
