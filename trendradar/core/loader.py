@@ -173,6 +173,23 @@ def _load_weight_config(config_data: Dict) -> Dict:
     }
 
 
+def _parse_rss_max_workers(raw) -> int:
+    """解析 RSS 并发线程数，非法值回退到 4。
+    Parse the RSS worker count; invalid values fall back to 4.
+    """
+    try:
+        workers = int(raw)
+    except (TypeError, ValueError):
+        print(f"[警告] RSS max_workers 格式错误 ({raw})，使用默认值 4")
+        print(f"[warning] RSS max_workers is invalid ({raw}); using 4")
+        return 4
+    if workers < 1:
+        print(f"[警告] RSS max_workers 小于 1 ({workers})，使用默认值 4")
+        print(f"[warning] RSS max_workers is below 1 ({workers}); using 4")
+        return 4
+    return workers
+
+
 def _load_rss_config(config_data: Dict) -> Dict:
     """加载 RSS 配置"""
     rss = config_data.get("rss", {})
@@ -201,6 +218,7 @@ def _load_rss_config(config_data: Dict) -> Dict:
     return {
         "ENABLED": rss.get("enabled", False),
         "REQUEST_INTERVAL": advanced_rss.get("request_interval", 2000),
+        "MAX_WORKERS": _parse_rss_max_workers(advanced_rss.get("max_workers", 4)),
         "TIMEOUT": advanced_rss.get("timeout", 15),
         "USE_PROXY": advanced_rss.get("use_proxy", False),
         "PROXY_URL": rss_proxy_url,
