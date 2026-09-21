@@ -10,6 +10,7 @@
 
 from trendradar.storage.base import (
     StorageBackend,
+    StorageError,
     NewsItem,
     NewsData,
     RSSItem,
@@ -31,6 +32,7 @@ except ImportError:
 __all__ = [
     # 基础类
     "StorageBackend",
+    "StorageError",
     "NewsItem",
     "NewsData",
     "RSSItem",
