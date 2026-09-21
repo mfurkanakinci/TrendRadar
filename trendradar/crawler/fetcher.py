@@ -10,12 +10,30 @@
 """
 
 import json
+import logging
 import random
 import time
 from typing import Dict, List, Tuple, Optional, Union
 from urllib.parse import urlparse
 
 import requests
+
+logger = logging.getLogger(__name__)
+
+# 视为暂时性故障、值得重试的 HTTP 状态码
+RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+class NonRetryableFetchError(Exception):
+    """不应重试的抓取错误（4xx、响应格式/状态异常）"""
+
+
+def _is_transient(exc: requests.RequestException) -> bool:
+    """判断请求异常是否为暂时性故障（超时、连接错误、5xx/429）"""
+    if isinstance(exc, requests.HTTPError):
+        response = exc.response
+        return response is not None and response.status_code in RETRYABLE_STATUS_CODES
+    return isinstance(exc, (requests.Timeout, requests.ConnectionError))
 
 
 class DataFetcher:
@@ -126,26 +144,37 @@ class DataFetcher:
                 response.raise_for_status()
 
                 data_text = response.text
-                data_json = json.loads(data_text)
+                try:
+                    data_json = json.loads(data_text)
+                except json.JSONDecodeError as e:
+                    raise NonRetryableFetchError(f"响应不是有效 JSON: {e}") from e
+                if not isinstance(data_json, dict):
+                    raise NonRetryableFetchError("响应 JSON 不是对象")
 
                 status = data_json.get("status", "未知")
                 if status not in ["success", "cache"]:
-                    raise ValueError(f"响应状态异常: {status}")
+                    raise NonRetryableFetchError(f"响应状态异常: {status}")
 
                 status_info = "最新数据" if status == "success" else "缓存数据"
                 print(f"获取 {id_value} 成功（{status_info}）")
                 return data_text, id_value, alias
 
-            except Exception as e:
+            except NonRetryableFetchError as e:
+                logger.warning("请求 %s 失败（不重试）: %s", id_value, e)
+                return None, id_value, alias
+
+            except requests.RequestException as e:
                 retries += 1
-                if retries <= max_retries:
+                if _is_transient(e) and retries <= max_retries:
                     base_wait = random.uniform(min_retry_wait, max_retry_wait)
                     additional_wait = (retries - 1) * random.uniform(1, 2)
                     wait_time = base_wait + additional_wait
-                    print(f"请求 {id_value} 失败: {e}. {wait_time:.2f}秒后重试...")
+                    logger.warning(
+                        "请求 %s 失败: %s. %.2f秒后重试...", id_value, e, wait_time
+                    )
                     time.sleep(wait_time)
                 else:
-                    print(f"请求 {id_value} 失败: {e}")
+                    logger.warning("请求 %s 失败: %s", id_value, e, exc_info=True)
                     return None, id_value, alias
 
         return None, id_value, alias
@@ -220,10 +249,10 @@ class DataFetcher:
                                 "mobileUrl": mobile_url,
                             }
                 except json.JSONDecodeError:
-                    print(f"解析 {id_value} 响应失败")
+                    logger.warning("解析 %s 响应失败", id_value, exc_info=True)
                     failed_ids.append(id_value)
-                except Exception as e:
-                    print(f"处理 {id_value} 数据出错: {e}")
+                except (AttributeError, TypeError, KeyError):
+                    logger.warning("处理 %s 数据出错", id_value, exc_info=True)
                     failed_ids.append(id_value)
             else:
                 failed_ids.append(id_value)
